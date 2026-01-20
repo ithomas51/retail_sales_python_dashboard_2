@@ -127,7 +127,18 @@ def load_invoice_data(input_dir: str) -> pd.DataFrame:
     # Clean financial columns
     combined['payments'] = combined[INVOICE_COLUMNS['payments']].apply(clean_currency)
     combined['balance'] = combined[INVOICE_COLUMNS['balance']].apply(clean_currency)
+    
+    # Calculate both gross and net billed amounts
+    # Gross: includes absolute value of all balances (conservative estimate)
+    # Net: only includes positive balances (accounts for credits/overpayments)
     combined['total_billed'] = combined['payments'] + combined['balance'].abs()
+    combined['net_billed'] = combined['payments'] + combined['balance'].clip(lower=0)
+    
+    # Prepare procedure code display column with explicit "Unspecified" category
+    proc_col = INVOICE_COLUMNS['proc_code']
+    if proc_col in combined.columns:
+        combined['proc_code_display'] = combined[proc_col].fillna('[Unspecified]')
+        combined.loc[combined['proc_code_display'].str.strip() == '', 'proc_code_display'] = '[Unspecified]'
     
     # Billing period
     if INVOICE_COLUMNS['billing_period'] in combined.columns:
@@ -189,43 +200,62 @@ def get_time_filtered_data(df: pd.DataFrame, period: str, reference_date=None) -
 
 
 def calculate_metrics(df: pd.DataFrame) -> dict:
-    """Calculate key metrics from dataframe."""
+    """
+    Calculate key metrics from dataframe.
+    
+    Collection Rate Calculation:
+    - Gross Rate: payments / (payments + abs(balance)) - conservative estimate
+    - Net Rate: payments / (payments + max(balance, 0)) - accounts for credits
+    - Returns None when total_billed = 0 to display as N/A
+    """
     if len(df) == 0:
         return {
             'total_items': 0,
             'total_payments': 0,
             'total_balance': 0,
-            'collection_rate': 100.0,
+            'collection_rate': None,  # N/A for no data
+            'net_collection_rate': None,
             'unique_invoices': 0,
             'retail_items': 0,
             'insurance_items': 0,
             'retail_payments': 0,
             'insurance_payments': 0,
             'recurring_pct': 0,
-            'avg_billing_period': 0
+            'avg_billing_period': 0,
+            'has_credits': False
         }
     
     total_payments = df['payments'].sum()
     total_balance = df['balance'].sum()
     total_billed = df['total_billed'].sum()
+    net_billed = df['net_billed'].sum() if 'net_billed' in df.columns else total_billed
+    
+    # Check for credits (negative balances)
+    has_credits = (df['balance'] < 0).any()
+    
+    # Calculate collection rates - return None for N/A when no billing
+    gross_collection_rate = (total_payments / total_billed * 100) if total_billed > 0 else None
+    net_collection_rate = (total_payments / net_billed * 100) if net_billed > 0 else None
     
     return {
         'total_items': len(df),
         'total_payments': total_payments,
         'total_balance': total_balance,
-        'collection_rate': (total_payments / total_billed * 100) if total_billed > 0 else 100.0,
+        'collection_rate': gross_collection_rate,
+        'net_collection_rate': net_collection_rate,
         'unique_invoices': df[INVOICE_COLUMNS['number']].nunique(),
         'retail_items': df['is_retail'].sum(),
         'insurance_items': df['is_insurance'].sum(),
         'retail_payments': df.loc[df['is_retail'], 'payments'].sum(),
         'insurance_payments': df.loc[df['is_insurance'], 'payments'].sum(),
         'recurring_pct': (df['is_recurring'].sum() / len(df) * 100) if len(df) > 0 else 0,
-        'avg_billing_period': df['billing_period'].mean()
+        'avg_billing_period': df['billing_period'].mean(),
+        'has_credits': has_credits
     }
 
 
 def display_metrics_panel(metrics: dict, title: str = "Key Metrics"):
-    """Display metrics in a styled panel."""
+    """Display metrics in a styled panel with N/A handling for edge cases."""
     st.subheader(title)
     
     col1, col2, col3, col4, col5, col6 = st.columns(6)
@@ -234,10 +264,18 @@ def display_metrics_panel(metrics: dict, title: str = "Key Metrics"):
         st.metric("Total Collected", f"${metrics['total_payments']:,.0f}")
     
     with col2:
-        st.metric("Outstanding Balance", f"${metrics['total_balance']:,.0f}")
+        balance_display = f"${metrics['total_balance']:,.0f}"
+        if metrics.get('has_credits', False):
+            balance_display += " *"
+        st.metric("Outstanding Balance", balance_display)
     
     with col3:
-        st.metric("Collection Rate", f"{metrics['collection_rate']:.1f}%")
+        # Handle N/A for collection rate when no billing exists
+        if metrics['collection_rate'] is None:
+            rate_display = "N/A"
+        else:
+            rate_display = f"{metrics['collection_rate']:.1f}%"
+        st.metric("Collection Rate", rate_display)
     
     with col4:
         st.metric("Invoice Count", f"{metrics['unique_invoices']:,}")
@@ -248,6 +286,12 @@ def display_metrics_panel(metrics: dict, title: str = "Key Metrics"):
     
     with col6:
         st.metric("Recurring Items", f"{metrics['recurring_pct']:.1f}%")
+    
+    # Show footnotes if applicable
+    if metrics.get('has_credits', False):
+        st.caption("* Balance includes credits/overpayments (negative balances)")
+    if metrics['collection_rate'] is None:
+        st.caption("N/A indicates no billable activity in the selected period")
 
 
 def create_branch_comparison(df: pd.DataFrame) -> go.Figure:
@@ -439,13 +483,18 @@ def create_collection_rate_by_branch(df: pd.DataFrame) -> go.Figure:
     return fig
 
 
-def calculate_percentile_rank(value: float, data_series: pd.Series) -> float:
+def calculate_percentile_rank(value: float, data_series: pd.Series, 
+                              secondary_value: float = None, 
+                              secondary_series: pd.Series = None) -> float:
     """
     Calculate the percentile rank of a value within a distribution.
     Uses the linear interpolation method (NumPy/Excel PERCENTILE.INC equivalent).
     
     Formula: percentile_rank = (count of values < x) / (n - 1) * 100
     Where n is the total number of observations.
+    
+    Tiebreaker: When secondary values provided, uses them to differentiate
+    tied primary values (adds tiny fraction based on secondary rank).
     
     Reference: Wikipedia - Percentile, Linear Interpolation Method (C=1)
     """
@@ -460,8 +509,23 @@ def calculate_percentile_rank(value: float, data_series: pd.Series) -> float:
     
     # Count values strictly less than the given value
     count_less = np.sum(sorted_data < value)
-    # Linear interpolation percentile rank
-    percentile = (count_less / (n - 1)) * 100 if n > 1 else 50.0
+    
+    # Apply secondary tiebreaker if provided and there are ties
+    count_equal = np.sum(sorted_data == value)
+    tiebreaker_adjustment = 0.0
+    
+    if count_equal > 1 and secondary_value is not None and secondary_series is not None:
+        # Normalize secondary value to [0, 1] range
+        sec_min = secondary_series.min()
+        sec_max = secondary_series.max()
+        sec_range = sec_max - sec_min
+        if sec_range > 0:
+            sec_normalized = (secondary_value - sec_min) / sec_range
+            # Add small adjustment (max 0.5 percentile point) to break ties
+            tiebreaker_adjustment = sec_normalized * 0.5 / n
+    
+    # Linear interpolation percentile rank with tiebreaker
+    percentile = ((count_less / (n - 1)) * 100 + tiebreaker_adjustment) if n > 1 else 50.0
     return min(max(percentile, 0.0), 100.0)
 
 
@@ -470,33 +534,44 @@ def calculate_branch_percentiles(df: pd.DataFrame) -> pd.DataFrame:
     Calculate peer group percentiles for each branch across key metrics.
     
     Metrics calculated:
-    - Payments Percentile: Branch payments rank vs all branches
-    - Collection Rate Percentile: Branch collection rate rank vs all branches
-    - Retail Mix Percentile: Branch retail percentage rank vs all branches
-    - Volume Percentile: Branch invoice count rank vs all branches
+    - Payments Percentile: Branch payments rank vs all branches (tiebreaker: volume)
+    - Collection Rate Percentile: Branch collection rate rank (tiebreaker: payments)
+    - Retail Mix Percentile: Branch retail percentage rank (tiebreaker: total items)
+    - Volume Percentile: Branch invoice count rank (tiebreaker: payments)
     
     Percentile Interpretation:
     - 90th percentile = Top 10% performer
     - 75th percentile = Top 25% performer (Q3)
     - 50th percentile = Median performer (Q2)
     - 25th percentile = Bottom 25% performer (Q1)
+    
+    Edge Case Handling:
+    - Zero-billed branches: Collection rate = None (excluded from percentile)
     """
-    branch_metrics = df.groupby('branch').agg({
+    agg_dict = {
         'payments': 'sum',
         'total_billed': 'sum',
         'is_retail': 'sum',
         'is_insurance': 'sum',
         INVOICE_COLUMNS['number']: 'nunique'
-    }).reset_index()
+    }
     
-    branch_metrics.columns = ['Branch', 'Payments', 'Total_Billed', 'Retail_Items', 
-                               'Insurance_Items', 'Invoices']
+    # Add net_billed if available
+    if 'net_billed' in df.columns:
+        agg_dict['net_billed'] = 'sum'
     
-    # Calculate derived metrics
-    branch_metrics['Collection_Rate'] = np.where(
-        branch_metrics['Total_Billed'] > 0,
-        (branch_metrics['Payments'] / branch_metrics['Total_Billed'] * 100),
-        100.0
+    branch_metrics = df.groupby('branch').agg(agg_dict).reset_index()
+    
+    base_cols = ['Branch', 'Payments', 'Total_Billed', 'Retail_Items', 'Insurance_Items', 'Invoices']
+    if 'net_billed' in df.columns:
+        base_cols.insert(3, 'Net_Billed')
+    branch_metrics.columns = base_cols
+    
+    # Calculate derived metrics with N/A handling for zero-billed
+    # Use None for zero-billed branches instead of 100%
+    branch_metrics['Collection_Rate'] = branch_metrics.apply(
+        lambda row: (row['Payments'] / row['Total_Billed'] * 100) 
+                    if row['Total_Billed'] > 0 else None, axis=1
     )
     
     total_items = branch_metrics['Retail_Items'] + branch_metrics['Insurance_Items']
@@ -505,25 +580,47 @@ def calculate_branch_percentiles(df: pd.DataFrame) -> pd.DataFrame:
         (branch_metrics['Retail_Items'] / total_items * 100),
         0.0
     )
+    branch_metrics['Total_Items'] = total_items
     
-    # Calculate percentile ranks for each metric
-    branch_metrics['Payments_Pctl'] = branch_metrics['Payments'].apply(
-        lambda x: calculate_percentile_rank(x, branch_metrics['Payments'])
+    # Calculate percentile ranks with secondary tiebreakers
+    # Payments: tiebreaker = invoice volume
+    branch_metrics['Payments_Pctl'] = branch_metrics.apply(
+        lambda row: calculate_percentile_rank(
+            row['Payments'], branch_metrics['Payments'],
+            row['Invoices'], branch_metrics['Invoices']
+        ), axis=1
     )
-    branch_metrics['Collection_Pctl'] = branch_metrics['Collection_Rate'].apply(
-        lambda x: calculate_percentile_rank(x, branch_metrics['Collection_Rate'])
+    
+    # Collection Rate: tiebreaker = payment volume (exclude N/A from percentile calc)
+    valid_collection = branch_metrics['Collection_Rate'].dropna()
+    branch_metrics['Collection_Pctl'] = branch_metrics.apply(
+        lambda row: calculate_percentile_rank(
+            row['Collection_Rate'], valid_collection,
+            row['Payments'], branch_metrics['Payments']
+        ) if pd.notna(row['Collection_Rate']) else None, axis=1
     )
-    branch_metrics['Retail_Mix_Pctl'] = branch_metrics['Retail_Mix'].apply(
-        lambda x: calculate_percentile_rank(x, branch_metrics['Retail_Mix'])
+    
+    # Retail Mix: tiebreaker = total items
+    branch_metrics['Retail_Mix_Pctl'] = branch_metrics.apply(
+        lambda row: calculate_percentile_rank(
+            row['Retail_Mix'], branch_metrics['Retail_Mix'],
+            row['Total_Items'], branch_metrics['Total_Items']
+        ), axis=1
     )
-    branch_metrics['Volume_Pctl'] = branch_metrics['Invoices'].apply(
-        lambda x: calculate_percentile_rank(x, branch_metrics['Invoices'])
+    
+    # Volume: tiebreaker = payments
+    branch_metrics['Volume_Pctl'] = branch_metrics.apply(
+        lambda row: calculate_percentile_rank(
+            row['Invoices'], branch_metrics['Invoices'],
+            row['Payments'], branch_metrics['Payments']
+        ), axis=1
     )
     
     # Calculate composite performance score (weighted average of percentiles)
+    # For branches with N/A collection, use median (50) as placeholder
     # Weights: Collection Rate 40%, Payments 30%, Volume 20%, Retail Mix 10%
     branch_metrics['Performance_Score'] = (
-        branch_metrics['Collection_Pctl'] * 0.40 +
+        branch_metrics['Collection_Pctl'].fillna(50.0) * 0.40 +
         branch_metrics['Payments_Pctl'] * 0.30 +
         branch_metrics['Volume_Pctl'] * 0.20 +
         branch_metrics['Retail_Mix_Pctl'] * 0.10
@@ -738,16 +835,32 @@ def main():
     st.sidebar.subheader("Procedure Code Filter")
     proc_col = '_proc_code_clean' if '_proc_code_clean' in filtered_df.columns else INVOICE_COLUMNS['proc_code']
     if proc_col in filtered_df.columns:
-        # Get top proc codes for filter options
-        proc_codes = filtered_df[proc_col].dropna().unique()
-        top_proc_codes = filtered_df.groupby(proc_col)['payments'].sum().nlargest(50).index.tolist()
+        # Get top proc codes for filter options, including Unspecified
+        top_proc_codes = filtered_df.groupby(proc_col)['payments'].sum().nlargest(49).index.tolist()
+        
+        # Add Unspecified option if there are missing proc codes
+        has_missing = filtered_df[proc_col].isna().any() or (filtered_df[proc_col].str.strip() == '').any()
+        if has_missing:
+            filter_options = ['[Unspecified]'] + top_proc_codes
+        else:
+            filter_options = top_proc_codes
+        
         selected_proc_codes = st.sidebar.multiselect(
             "Procedure Codes (Top 50 by Volume)",
-            options=top_proc_codes,
+            options=filter_options,
             default=[]
         )
         if selected_proc_codes:
-            filtered_df = filtered_df[filtered_df[proc_col].isin(selected_proc_codes)]
+            if '[Unspecified]' in selected_proc_codes:
+                # Include both null and empty string proc codes
+                unspec_mask = filtered_df[proc_col].isna() | (filtered_df[proc_col].str.strip() == '')
+                other_codes = [c for c in selected_proc_codes if c != '[Unspecified]']
+                if other_codes:
+                    filtered_df = filtered_df[unspec_mask | filtered_df[proc_col].isin(other_codes)]
+                else:
+                    filtered_df = filtered_df[unspec_mask]
+            else:
+                filtered_df = filtered_df[filtered_df[proc_col].isin(selected_proc_codes)]
     
     # Sales Order Search
     st.sidebar.divider()
@@ -792,11 +905,37 @@ def main():
     # Peer Group Percentile Analysis (full width)
     st.divider()
     st.subheader("Branch Performance Benchmarking")
-    st.plotly_chart(create_branch_percentile_chart(filtered_df), use_container_width=True)
+    
+    # Small sample size warning for percentile analysis
+    branch_count = filtered_df['branch'].nunique()
+    if branch_count < 5:
+        st.warning(
+            f"Insufficient data for percentile analysis. "
+            f"Only {branch_count} branches in selection. Minimum 5 required for meaningful comparison."
+        )
+    elif branch_count < 10:
+        st.info(
+            f"Note: Percentiles based on {branch_count} branches. "
+            f"Statistical significance increases with larger samples (10+ recommended)."
+        )
+    
+    if branch_count >= 5:
+        st.plotly_chart(create_branch_percentile_chart(filtered_df), use_container_width=True)
+    else:
+        st.caption("Percentile chart hidden due to insufficient branch count. Select more branches to enable.")
     
     # Procedure Code Analysis by Branch
     st.divider()
     st.subheader("Procedure Code Analysis by Branch")
+    
+    # Show missing proc code statistics
+    proc_col = '_proc_code_clean' if '_proc_code_clean' in filtered_df.columns else INVOICE_COLUMNS['proc_code']
+    if proc_col in filtered_df.columns:
+        missing_count = filtered_df[proc_col].isna().sum() + (filtered_df[proc_col].str.strip() == '').sum()
+        missing_pct = (missing_count / len(filtered_df)) * 100 if len(filtered_df) > 0 else 0
+        if missing_pct > 0:
+            st.caption(f"Note: {missing_pct:.1f}% of items have unspecified procedure codes")
+    
     proc_top_n = st.slider("Number of top procedure codes to display", min_value=5, max_value=20, value=10)
     st.plotly_chart(create_proc_code_by_branch_chart(filtered_df, top_n=proc_top_n), use_container_width=True)
     
@@ -809,17 +948,21 @@ def main():
     branch_perf = calculate_branch_percentiles(filtered_df)
     branch_perf = branch_perf.sort_values('Performance_Score', ascending=False)
     
-    # Format for display
+    # Format for display with N/A handling
     display_perf = branch_perf[[
         'Branch', 'Payments', 'Collection_Rate', 'Retail_Mix', 'Invoices',
         'Payments_Pctl', 'Collection_Pctl', 'Retail_Mix_Pctl', 'Volume_Pctl', 'Performance_Score'
     ]].copy()
     
     display_perf['Payments'] = display_perf['Payments'].apply(lambda x: f"${x:,.0f}")
-    display_perf['Collection_Rate'] = display_perf['Collection_Rate'].apply(lambda x: f"{x:.1f}%")
+    display_perf['Collection_Rate'] = display_perf['Collection_Rate'].apply(
+        lambda x: f"{x:.1f}%" if pd.notna(x) else "N/A"
+    )
     display_perf['Retail_Mix'] = display_perf['Retail_Mix'].apply(lambda x: f"{x:.1f}%")
     display_perf['Payments_Pctl'] = display_perf['Payments_Pctl'].apply(lambda x: f"{x:.0f}")
-    display_perf['Collection_Pctl'] = display_perf['Collection_Pctl'].apply(lambda x: f"{x:.0f}")
+    display_perf['Collection_Pctl'] = display_perf['Collection_Pctl'].apply(
+        lambda x: f"{x:.0f}" if pd.notna(x) else "N/A"
+    )
     display_perf['Retail_Mix_Pctl'] = display_perf['Retail_Mix_Pctl'].apply(lambda x: f"{x:.0f}")
     display_perf['Volume_Pctl'] = display_perf['Volume_Pctl'].apply(lambda x: f"{x:.0f}")
     display_perf['Performance_Score'] = display_perf['Performance_Score'].apply(lambda x: f"{x:.1f}")
