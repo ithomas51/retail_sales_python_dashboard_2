@@ -62,9 +62,8 @@ st.set_page_config(
 # Enterprise Light Theme - Minimal CSS (colors handled by .streamlit/config.toml)
 st.markdown("""
 <style>
-    /* Hide default branding only */
+    /* Hide default branding only - keep sidebar toggle visible */
     #MainMenu, footer {visibility: hidden;}
-    #root > div:nth-child(1) > div.withScreencast > div > div > div > header {display: none;}
     
     /* Main container spacing */
     .main .block-container {
