@@ -76,6 +76,108 @@ def clean_currency(value):
         return 0.0
 
 
+def safe_parse_date(value):
+    """
+    Safe parse date to YYYY-MM-DD format string, then to datetime.
+    Handles: M/D/YYYY H:MM:SS AM/PM, M/D/YYYY, and various other formats.
+    Returns datetime object or pd.NaT.
+    """
+    if pd.isna(value):
+        return pd.NaT
+    if isinstance(value, (pd.Timestamp, datetime)):
+        return value
+    try:
+        s = str(value).strip()
+        if not s:
+            return pd.NaT
+        # Try common date formats
+        for fmt in [
+            '%m/%d/%Y %I:%M:%S %p',  # 9/29/2020 3:06:15 AM
+            '%m/%d/%Y %H:%M:%S',      # 9/29/2020 15:06:15
+            '%m/%d/%Y',               # 9/29/2020
+            '%Y-%m-%d %H:%M:%S',      # 2020-09-29 15:06:15
+            '%Y-%m-%d',               # 2020-09-29
+        ]:
+            try:
+                return datetime.strptime(s, fmt)
+            except ValueError:
+                continue
+        # Fallback: try pandas
+        return pd.to_datetime(s, errors='coerce')
+    except Exception:
+        return pd.NaT
+
+
+# Global proc code mapping dictionary (loaded once)
+_PROC_CODE_MAPPING = None
+
+
+def load_proc_code_mapping(mapping_file: Path = None) -> dict:
+    """
+    Load proc code mapping from CSV file.
+    Maps original proc codes (from originals_pipe) to standardized codes (final5).
+    Returns dict: {original_code: final5_code}
+    """
+    global _PROC_CODE_MAPPING
+    if _PROC_CODE_MAPPING is not None:
+        return _PROC_CODE_MAPPING
+    
+    _PROC_CODE_MAPPING = {}
+    
+    if mapping_file is None:
+        # Default location relative to script (in data folder)
+        mapping_file = Path(__file__).parent.parent / 'data' / 'mapping_suggestions_DW_fixed.csv'
+    
+    if not mapping_file.exists():
+        logger.warning(f"Proc code mapping file not found: {mapping_file}")
+        return _PROC_CODE_MAPPING
+    
+    try:
+        mapping_df = pd.read_csv(mapping_file)
+        for _, row in mapping_df.iterrows():
+            final5 = str(row['final5']).strip().upper()
+            originals = str(row['originals_pipe'])
+            # Split by pipe and map each original to final5
+            for orig in originals.split('|'):
+                orig_clean = orig.strip()
+                if orig_clean:
+                    # Store both original case and uppercase for matching
+                    _PROC_CODE_MAPPING[orig_clean] = final5
+                    _PROC_CODE_MAPPING[orig_clean.upper()] = final5
+                    _PROC_CODE_MAPPING[orig_clean.lower()] = final5
+        logger.info(f"Loaded {len(_PROC_CODE_MAPPING)} proc code mappings from {mapping_file.name}")
+    except Exception as e:
+        logger.error(f"Error loading proc code mapping: {e}")
+    
+    return _PROC_CODE_MAPPING
+
+
+def clean_proc_code(value) -> str:
+    """
+    Clean and standardize procedure code using mapping file.
+    Returns standardized HCPCS code (final5) or original if not mapped.
+    """
+    if pd.isna(value):
+        return 'UNKNOWN'
+    
+    orig = str(value).strip()
+    if not orig:
+        return 'UNKNOWN'
+    
+    mapping = load_proc_code_mapping()
+    
+    # Try exact match first
+    if orig in mapping:
+        return mapping[orig]
+    
+    # Try uppercase
+    if orig.upper() in mapping:
+        return mapping[orig.upper()]
+    
+    # No mapping found - return uppercase original
+    return orig.upper()
+
+
 def parse_date(value):
     """
     Parse date string to datetime.
@@ -106,18 +208,24 @@ def load_and_process_file(filepath):
     year_label = filepath.stem
     df['_source_year'] = year_label
     
-    # Parse dates
+    # === SAFE DATE PARSING (at very beginning of pipeline) ===
+    # Parse dates using safe_parse_date -> outputs YYYY-MM-DD compatible datetime
     if INVOICE_COLUMNS['date_created'] in df.columns:
-        df['_date_created'] = pd.to_datetime(df[INVOICE_COLUMNS['date_created']], 
-                                              format='mixed', errors='coerce')
+        df['_date_created'] = df[INVOICE_COLUMNS['date_created']].apply(safe_parse_date)
     else:
         df['_date_created'] = pd.NaT
     
     if INVOICE_COLUMNS['date_of_service'] in df.columns:
-        df['_date_of_service'] = pd.to_datetime(df[INVOICE_COLUMNS['date_of_service']], 
-                                                 format='mixed', errors='coerce')
+        df['_date_of_service'] = df[INVOICE_COLUMNS['date_of_service']].apply(safe_parse_date)
     else:
         df['_date_of_service'] = pd.NaT
+    
+    # === CLEAN PROC CODES (early in pipeline) ===
+    # Map raw proc codes to standardized HCPCS codes using mapping file
+    if INVOICE_COLUMNS['proc_code'] in df.columns:
+        df['_proc_code_clean'] = df[INVOICE_COLUMNS['proc_code']].apply(clean_proc_code)
+    else:
+        df['_proc_code_clean'] = 'UNKNOWN'
     
     # Classify as Retail or Insurance based on Policy Payor Level
     # RETAIL = Patient (self-pay / private pay)
@@ -465,8 +573,11 @@ def main(input_dir: Path, output_dir: Path):
         INVOICE_COLUMNS['balance'],
         INVOICE_COLUMNS['qty'],
         INVOICE_COLUMNS['proc_code'],
+        '_proc_code_clean',
         INVOICE_COLUMNS['item_group'],
         '_source_year',
+        '_date_created',
+        '_date_of_service',
         '_payments',
         '_balance',
         '_billing_period',

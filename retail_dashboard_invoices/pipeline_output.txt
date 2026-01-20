@@ -1,0 +1,15 @@
+2026-01-20 12:37:44,540 - INFO - Logging to: logs\analyze_invoices_20260120_123744.log
+2026-01-20 12:37:44,540 - INFO - ============================================================
+2026-01-20 12:37:44,540 - INFO - INVOICE DATA PROCESSING
+2026-01-20 12:37:44,540 - INFO - Run Date: 2026-01-20 12:37:44
+2026-01-20 12:37:44,540 - INFO - ============================================================
+2026-01-20 12:37:44,540 - INFO - Found 6 files to process
+2026-01-20 12:37:44,540 - INFO - Loading 2020.csv...
+2026-01-20 12:37:44,540 - INFO - Processing: 2020.csv
+2026-01-20 12:37:49,646 - INFO - Loaded 1277 proc code mappings from mapping_suggestions_DW_fixed.csv
+2026-01-20 12:37:50,226 - INFO -   Rows: 398,582
+2026-01-20 12:37:50,693 - INFO - Loading 2021.csv...
+2026-01-20 12:37:50,693 - INFO - Processing: 2021.csv
+2026-01-20 12:37:56,816 - INFO -   Rows: 443,541
+2026-01-20 12:37:57,425 - INFO - Loading 2022.csv...
+2026-01-20 12:37:57,425 - INFO - Processing: 2022.csv
