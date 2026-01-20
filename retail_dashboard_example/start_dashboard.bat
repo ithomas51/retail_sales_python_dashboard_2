@@ -20,7 +20,7 @@ if exist ".venv\Scripts\activate.bat" (
 
 REM Start Streamlit with production settings
 python -m streamlit run scripts\retail_dashboard.py ^
-    --server.port=8501 ^
+    --server.port=54947 ^
     --server.address=0.0.0.0 ^
     --server.headless=true ^
     --browser.gatherUsageStats=false ^

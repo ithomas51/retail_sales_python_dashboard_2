@@ -5,6 +5,7 @@
 .DESCRIPTION
     This script automates the installation of the Retail Dashboard 
     Streamlit application as a Windows service using NSSM.
+    Also supports running as a background job without NSSM.
 
 .PARAMETER NssmPath
     Path to nssm.exe. Default: C:\Tools\nssm\win64\nssm.exe
@@ -24,10 +25,17 @@
 .PARAMETER Status
     Check service status
 
+.PARAMETER Background
+    Run as background job (no NSSM required, survives terminal close)
+
+.PARAMETER StopBackground
+    Stop background job
+
 .EXAMPLE
     .\Install-DashboardService.ps1 -Install
     .\Install-DashboardService.ps1 -Start
     .\Install-DashboardService.ps1 -Status
+    .\Install-DashboardService.ps1 -Background   # No NSSM needed
 #>
 
 [CmdletBinding()]
@@ -37,7 +45,9 @@ param(
     [switch]$Uninstall,
     [switch]$Start,
     [switch]$Stop,
-    [switch]$Status
+    [switch]$Status,
+    [switch]$Background,
+    [switch]$StopBackground
 )
 
 # Configuration
@@ -191,15 +201,117 @@ function Get-ServiceStatus {
     
     if ($status -match "SERVICE_RUNNING") {
         Write-Host ""
-        Write-Host "Dashboard URL: http://localhost:8501" -ForegroundColor Green
+        Write-Host "Dashboard URL: http://localhost:54947" -ForegroundColor Green
         
         # Test health endpoint
         try {
-            $response = Invoke-WebRequest -Uri "http://localhost:8501/_stcore/health" -TimeoutSec 5 -UseBasicParsing -ErrorAction Stop
+            $response = Invoke-WebRequest -Uri "http://localhost:54947/_stcore/health" -TimeoutSec 5 -UseBasicParsing -ErrorAction Stop
             Write-Host "Health Check: OK" -ForegroundColor Green
         } catch {
             Write-Host "Health Check: Dashboard may still be starting..." -ForegroundColor Yellow
         }
+    }
+}
+
+# Background job functions (no NSSM required)
+$PidFile = Join-Path $LogDir "dashboard.pid"
+
+function Start-BackgroundDashboard {
+    Write-Host "Starting dashboard as background job..." -ForegroundColor Cyan
+    
+    # Check if already running
+    if (Test-Path $PidFile) {
+        $existingPid = Get-Content $PidFile -ErrorAction SilentlyContinue
+        if ($existingPid) {
+            $proc = Get-Process -Id $existingPid -ErrorAction SilentlyContinue
+            if ($proc) {
+                Write-Host "Dashboard already running (PID: $existingPid)" -ForegroundColor Yellow
+                Write-Host "URL: http://localhost:54947" -ForegroundColor Green
+                return
+            }
+        }
+    }
+    
+    # Start process hidden (survives terminal close)
+    $StdoutLog = Join-Path $LogDir "dashboard_stdout.log"
+    $StderrLog = Join-Path $LogDir "dashboard_stderr.log"
+    
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = "cmd.exe"
+    $psi.Arguments = "/c `"$BatchFile`" > `"$StdoutLog`" 2> `"$StderrLog`""
+    $psi.WorkingDirectory = $ProjectPath
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
+    
+    $process = [System.Diagnostics.Process]::Start($psi)
+    $process.Id | Out-File -FilePath $PidFile -Force
+    
+    Write-Host ""
+    Write-Host "Dashboard started in background!" -ForegroundColor Green
+    Write-Host "PID: $($process.Id)" -ForegroundColor Cyan
+    Write-Host "URL: http://localhost:54947" -ForegroundColor Green
+    Write-Host ""
+    Write-Host "Logs:" -ForegroundColor Cyan
+    Write-Host "  stdout: $StdoutLog"
+    Write-Host "  stderr: $StderrLog"
+    Write-Host ""
+    Write-Host "To stop: .\Install-DashboardService.ps1 -StopBackground" -ForegroundColor Yellow
+}
+
+function Stop-BackgroundDashboard {
+    Write-Host "Stopping background dashboard..." -ForegroundColor Cyan
+    
+    if (-not (Test-Path $PidFile)) {
+        Write-Host "No PID file found. Dashboard may not be running." -ForegroundColor Yellow
+        return
+    }
+    
+    $pid = Get-Content $PidFile -ErrorAction SilentlyContinue
+    if ($pid) {
+        # Kill the cmd process and its children (streamlit)
+        $proc = Get-Process -Id $pid -ErrorAction SilentlyContinue
+        if ($proc) {
+            # Get child processes (streamlit, python)
+            Get-CimInstance Win32_Process | Where-Object { $_.ParentProcessId -eq $pid } | ForEach-Object {
+                Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+            }
+            Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue
+            Write-Host "Dashboard stopped (PID: $pid)" -ForegroundColor Green
+        } else {
+            Write-Host "Process not found. May have already stopped." -ForegroundColor Yellow
+        }
+    }
+    
+    Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
+}
+
+function Get-BackgroundStatus {
+    Write-Host ""
+    Write-Host "Background Dashboard Status" -ForegroundColor Cyan
+    Write-Host "===========================" -ForegroundColor Cyan
+    
+    if (Test-Path $PidFile) {
+        $pid = Get-Content $PidFile -ErrorAction SilentlyContinue
+        $proc = Get-Process -Id $pid -ErrorAction SilentlyContinue
+        if ($proc) {
+            Write-Host "Status: RUNNING" -ForegroundColor Green
+            Write-Host "PID: $pid"
+            Write-Host "URL: http://localhost:54947" -ForegroundColor Green
+            
+            # Health check
+            try {
+                $response = Invoke-WebRequest -Uri "http://localhost:54947/_stcore/health" -TimeoutSec 5 -UseBasicParsing -ErrorAction Stop
+                Write-Host "Health: OK" -ForegroundColor Green
+            } catch {
+                Write-Host "Health: Starting or unavailable..." -ForegroundColor Yellow
+            }
+        } else {
+            Write-Host "Status: STOPPED (stale PID file)" -ForegroundColor Yellow
+            Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
+        }
+    } else {
+        Write-Host "Status: NOT RUNNING" -ForegroundColor Yellow
     }
 }
 
@@ -214,18 +326,27 @@ if ($Install) {
     Stop-DashboardService
 } elseif ($Status) {
     Get-ServiceStatus
+    Get-BackgroundStatus
+} elseif ($Background) {
+    Start-BackgroundDashboard
+} elseif ($StopBackground) {
+    Stop-BackgroundDashboard
 } else {
     Write-Host "Retail Dashboard Service Installer" -ForegroundColor Cyan
     Write-Host "===================================" -ForegroundColor Cyan
     Write-Host ""
-    Write-Host "Usage:" -ForegroundColor Yellow
+    Write-Host "NSSM Service (recommended for production):" -ForegroundColor Yellow
     Write-Host "  .\Install-DashboardService.ps1 -Install    # Install service"
     Write-Host "  .\Install-DashboardService.ps1 -Start      # Start service"
     Write-Host "  .\Install-DashboardService.ps1 -Stop       # Stop service"
     Write-Host "  .\Install-DashboardService.ps1 -Status     # Check status"
     Write-Host "  .\Install-DashboardService.ps1 -Uninstall  # Remove service"
     Write-Host ""
-    Write-Host "Prerequisites:" -ForegroundColor Yellow
+    Write-Host "Background Job (no NSSM required):" -ForegroundColor Yellow
+    Write-Host "  .\Install-DashboardService.ps1 -Background      # Start background"
+    Write-Host "  .\Install-DashboardService.ps1 -StopBackground  # Stop background"
+    Write-Host ""
+    Write-Host "Prerequisites for NSSM:" -ForegroundColor Yellow
     Write-Host "  1. Download NSSM from https://nssm.cc/download"
     Write-Host "  2. Extract to C:\Tools\nssm\"
     Write-Host "  3. Run PowerShell as Administrator"
