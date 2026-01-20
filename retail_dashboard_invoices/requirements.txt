@@ -1,0 +1,18 @@
+# Invoice Dashboard Requirements
+# Python 3.9+
+
+# Data Processing
+pandas>=2.0.0
+numpy>=1.24.0
+
+# Excel Generation
+openpyxl>=3.1.0
+
+# Visualization
+plotly>=5.18.0
+
+# Web Dashboard
+streamlit>=1.29.0
+
+# Utilities
+pathlib2>=2.3.0;python_version<"3.4"
