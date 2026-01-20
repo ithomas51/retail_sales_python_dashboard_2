@@ -249,6 +249,19 @@ def main():
     if selected_years:
         filtered_df = filtered_df[filtered_df['year'].isin(selected_years)]
     
+    # Sales Order Status filter
+    filtered_df['order_status'] = filtered_df['Sales Order Status'].fillna('Unknown').str.strip()
+    available_statuses = sorted(filtered_df['order_status'].unique())
+    default_statuses = [s for s in ['Closed', 'Active'] if s in available_statuses]
+    selected_statuses = st.sidebar.multiselect(
+        "Sales Order Status",
+        options=available_statuses,
+        default=default_statuses
+    )
+    
+    if selected_statuses:
+        filtered_df = filtered_df[filtered_df['order_status'].isin(selected_statuses)]
+    
     # Branch filter
     available_branches = sorted(filtered_df['branch'].unique())
     selected_branches = st.sidebar.multiselect(
