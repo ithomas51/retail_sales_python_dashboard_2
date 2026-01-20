@@ -1,7 +1,7 @@
 """
-Invoice Dashboard - Interactive Streamlit Application
-Provides analytics for invoice data with Retail vs Insurance classification,
-billing period analysis, and collection metrics.
+Invoice Analytics Dashboard - Enterprise Streamlit Application
+Provides comprehensive analytics for invoice data with Retail vs Insurance classification,
+billing period analysis, collection metrics, and peer group benchmarking.
 
 Usage:
     streamlit run invoice_dashboard.py -- -i data/brightree/invoices
@@ -10,8 +10,11 @@ Features:
 - 5-Year dashboard (FY2021 - FY2025)
 - Rolling periods: 1mo, 3mo, 6mo, 90d
 - Metrics grouped by Branch, then Time Period
-- Collection rate visualization
+- Collection rate visualization with percentile benchmarking
 - Rental billing period analysis
+- Procedure code analysis by branch
+- Sales order search functionality
+- Peer group performance percentiles
 """
 
 import argparse
@@ -24,6 +27,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from pathlib import Path
 from datetime import datetime, timedelta
+from scipy import stats
 
 # Page configuration
 st.set_page_config(
@@ -435,6 +439,247 @@ def create_collection_rate_by_branch(df: pd.DataFrame) -> go.Figure:
     return fig
 
 
+def calculate_percentile_rank(value: float, data_series: pd.Series) -> float:
+    """
+    Calculate the percentile rank of a value within a distribution.
+    Uses the linear interpolation method (NumPy/Excel PERCENTILE.INC equivalent).
+    
+    Formula: percentile_rank = (count of values < x) / (n - 1) * 100
+    Where n is the total number of observations.
+    
+    Reference: Wikipedia - Percentile, Linear Interpolation Method (C=1)
+    """
+    if len(data_series) == 0:
+        return 50.0
+    sorted_data = np.sort(data_series.dropna().values)
+    n = len(sorted_data)
+    if n == 0:
+        return 50.0
+    if n == 1:
+        return 50.0
+    
+    # Count values strictly less than the given value
+    count_less = np.sum(sorted_data < value)
+    # Linear interpolation percentile rank
+    percentile = (count_less / (n - 1)) * 100 if n > 1 else 50.0
+    return min(max(percentile, 0.0), 100.0)
+
+
+def calculate_branch_percentiles(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Calculate peer group percentiles for each branch across key metrics.
+    
+    Metrics calculated:
+    - Payments Percentile: Branch payments rank vs all branches
+    - Collection Rate Percentile: Branch collection rate rank vs all branches
+    - Retail Mix Percentile: Branch retail percentage rank vs all branches
+    - Volume Percentile: Branch invoice count rank vs all branches
+    
+    Percentile Interpretation:
+    - 90th percentile = Top 10% performer
+    - 75th percentile = Top 25% performer (Q3)
+    - 50th percentile = Median performer (Q2)
+    - 25th percentile = Bottom 25% performer (Q1)
+    """
+    branch_metrics = df.groupby('branch').agg({
+        'payments': 'sum',
+        'total_billed': 'sum',
+        'is_retail': 'sum',
+        'is_insurance': 'sum',
+        INVOICE_COLUMNS['number']: 'nunique'
+    }).reset_index()
+    
+    branch_metrics.columns = ['Branch', 'Payments', 'Total_Billed', 'Retail_Items', 
+                               'Insurance_Items', 'Invoices']
+    
+    # Calculate derived metrics
+    branch_metrics['Collection_Rate'] = np.where(
+        branch_metrics['Total_Billed'] > 0,
+        (branch_metrics['Payments'] / branch_metrics['Total_Billed'] * 100),
+        100.0
+    )
+    
+    total_items = branch_metrics['Retail_Items'] + branch_metrics['Insurance_Items']
+    branch_metrics['Retail_Mix'] = np.where(
+        total_items > 0,
+        (branch_metrics['Retail_Items'] / total_items * 100),
+        0.0
+    )
+    
+    # Calculate percentile ranks for each metric
+    branch_metrics['Payments_Pctl'] = branch_metrics['Payments'].apply(
+        lambda x: calculate_percentile_rank(x, branch_metrics['Payments'])
+    )
+    branch_metrics['Collection_Pctl'] = branch_metrics['Collection_Rate'].apply(
+        lambda x: calculate_percentile_rank(x, branch_metrics['Collection_Rate'])
+    )
+    branch_metrics['Retail_Mix_Pctl'] = branch_metrics['Retail_Mix'].apply(
+        lambda x: calculate_percentile_rank(x, branch_metrics['Retail_Mix'])
+    )
+    branch_metrics['Volume_Pctl'] = branch_metrics['Invoices'].apply(
+        lambda x: calculate_percentile_rank(x, branch_metrics['Invoices'])
+    )
+    
+    # Calculate composite performance score (weighted average of percentiles)
+    # Weights: Collection Rate 40%, Payments 30%, Volume 20%, Retail Mix 10%
+    branch_metrics['Performance_Score'] = (
+        branch_metrics['Collection_Pctl'] * 0.40 +
+        branch_metrics['Payments_Pctl'] * 0.30 +
+        branch_metrics['Volume_Pctl'] * 0.20 +
+        branch_metrics['Retail_Mix_Pctl'] * 0.10
+    )
+    
+    return branch_metrics
+
+
+def create_branch_percentile_chart(df: pd.DataFrame) -> go.Figure:
+    """Create branch performance percentile chart with peer group comparison."""
+    branch_metrics = calculate_branch_percentiles(df)
+    
+    # Sort by performance score and get top 15
+    branch_metrics = branch_metrics.sort_values('Performance_Score', ascending=True).tail(15)
+    
+    fig = go.Figure()
+    
+    # Add stacked bar for each percentile component
+    fig.add_trace(go.Bar(
+        y=branch_metrics['Branch'],
+        x=branch_metrics['Collection_Pctl'] * 0.40,
+        orientation='h',
+        name='Collection Rate (40%)',
+        marker_color='#1565C0',
+        text=branch_metrics['Collection_Pctl'].apply(lambda x: f'{x:.0f}'),
+        textposition='inside'
+    ))
+    
+    fig.add_trace(go.Bar(
+        y=branch_metrics['Branch'],
+        x=branch_metrics['Payments_Pctl'] * 0.30,
+        orientation='h',
+        name='Payments (30%)',
+        marker_color='#43A047',
+        text=branch_metrics['Payments_Pctl'].apply(lambda x: f'{x:.0f}'),
+        textposition='inside'
+    ))
+    
+    fig.add_trace(go.Bar(
+        y=branch_metrics['Branch'],
+        x=branch_metrics['Volume_Pctl'] * 0.20,
+        orientation='h',
+        name='Volume (20%)',
+        marker_color='#FB8C00',
+        text=branch_metrics['Volume_Pctl'].apply(lambda x: f'{x:.0f}'),
+        textposition='inside'
+    ))
+    
+    fig.add_trace(go.Bar(
+        y=branch_metrics['Branch'],
+        x=branch_metrics['Retail_Mix_Pctl'] * 0.10,
+        orientation='h',
+        name='Retail Mix (10%)',
+        marker_color='#8E24AA',
+        text=branch_metrics['Retail_Mix_Pctl'].apply(lambda x: f'{x:.0f}'),
+        textposition='inside'
+    ))
+    
+    # Add reference lines for percentile thresholds
+    fig.add_vline(x=75, line_dash="dash", line_color="gray", 
+                  annotation_text="75th Pctl")
+    fig.add_vline(x=50, line_dash="dot", line_color="gray",
+                  annotation_text="Median")
+    
+    fig.update_layout(
+        title='Branch Performance Score by Peer Group Percentile',
+        xaxis_title='Weighted Performance Score',
+        yaxis_title='Branch',
+        barmode='stack',
+        height=550,
+        template='plotly_white',
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+    )
+    
+    return fig
+
+
+def create_proc_code_by_branch_chart(df: pd.DataFrame, top_n: int = 10) -> go.Figure:
+    """Create procedure code analysis by branch heatmap."""
+    # Determine proc code column to use
+    proc_col = '_proc_code_clean' if '_proc_code_clean' in df.columns else INVOICE_COLUMNS['proc_code']
+    
+    if proc_col not in df.columns:
+        fig = go.Figure()
+        fig.add_annotation(text="Procedure code data not available", 
+                          xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False)
+        return fig
+    
+    # Get top procedure codes by payment volume
+    top_procs = df.groupby(proc_col)['payments'].sum().nlargest(top_n).index.tolist()
+    
+    # Filter to top proc codes and pivot
+    df_filtered = df[df[proc_col].isin(top_procs)]
+    pivot_data = df_filtered.pivot_table(
+        values='payments',
+        index='branch',
+        columns=proc_col,
+        aggfunc='sum',
+        fill_value=0
+    )
+    
+    # Get top 15 branches by total payments
+    branch_totals = pivot_data.sum(axis=1).nlargest(15)
+    pivot_data = pivot_data.loc[branch_totals.index]
+    
+    fig = go.Figure(data=go.Heatmap(
+        z=pivot_data.values,
+        x=pivot_data.columns,
+        y=pivot_data.index,
+        colorscale='Blues',
+        text=np.vectorize(lambda x: f'${x/1000:,.0f}K' if x >= 1000 else f'${x:,.0f}')(pivot_data.values),
+        texttemplate='%{text}',
+        textfont={"size": 9},
+        hovertemplate='Branch: %{y}<br>Proc Code: %{x}<br>Payments: $%{z:,.0f}<extra></extra>'
+    ))
+    
+    fig.update_layout(
+        title=f'Top {top_n} Procedure Codes by Branch (Payments)',
+        xaxis_title='Procedure Code',
+        yaxis_title='Branch',
+        height=500,
+        template='plotly_white'
+    )
+    
+    return fig
+
+
+def search_sales_orders(df: pd.DataFrame, search_term: str) -> pd.DataFrame:
+    """Search for sales orders by number or partial match."""
+    if not search_term or len(search_term) < 2:
+        return pd.DataFrame()
+    
+    so_col = INVOICE_COLUMNS['so_number']
+    inv_col = INVOICE_COLUMNS['number']
+    
+    # Search in both sales order and invoice number columns
+    mask = pd.Series(False, index=df.index)
+    
+    if so_col in df.columns:
+        mask |= df[so_col].astype(str).str.contains(search_term, case=False, na=False)
+    
+    if inv_col in df.columns:
+        mask |= df[inv_col].astype(str).str.contains(search_term, case=False, na=False)
+    
+    results = df[mask].copy()
+    
+    # Select relevant columns for display
+    display_cols = [
+        inv_col, so_col, INVOICE_COLUMNS['date_of_service'], 'branch',
+        INVOICE_COLUMNS['item_name'], 'payments', 'balance', 'payor_level_clean'
+    ]
+    available_cols = [c for c in display_cols if c in results.columns]
+    
+    return results[available_cols].drop_duplicates().head(100)
+
+
 def main():
     """Main dashboard function."""
     # Parse command line arguments
@@ -456,14 +701,7 @@ def main():
     st.title("Invoice Analytics Dashboard")
     st.markdown("**5-Year Analysis (FY2021 - FY2025) | Reporting Period: January 1, 2021 - December 31, 2025**")
     
-    # Sidebar filters
-    st.sidebar.header("Filters")
-    
-    # Time period filter
-    time_periods = ["5 Years", "FY 2025", "YTD", "QTD", "6 Months", "3 Months", "90 Days", "1 Month"]
-    selected_period = st.sidebar.selectbox("Time Period", time_periods, index=0)
-    
-    # Load data
+    # Load data first
     with st.spinner("Loading invoice data..."):
         df = load_invoice_data(args.input)
     
@@ -471,7 +709,14 @@ def main():
         st.error("No data loaded. Check the input directory path.")
         return
     
-    # Apply time filter
+    # Sidebar filters
+    st.sidebar.header("Filters")
+    
+    # Time period filter
+    time_periods = ["5 Years", "FY 2025", "YTD", "QTD", "6 Months", "3 Months", "90 Days", "1 Month"]
+    selected_period = st.sidebar.selectbox("Time Period", time_periods, index=0)
+    
+    # Apply time filter first
     filtered_df = get_time_filtered_data(df, selected_period)
     
     # Branch filter
@@ -488,13 +733,45 @@ def main():
     elif payor_filter == "Insurance Only":
         filtered_df = filtered_df[filtered_df['is_insurance']]
     
+    # Procedure Code filter
+    st.sidebar.divider()
+    st.sidebar.subheader("Procedure Code Filter")
+    proc_col = '_proc_code_clean' if '_proc_code_clean' in filtered_df.columns else INVOICE_COLUMNS['proc_code']
+    if proc_col in filtered_df.columns:
+        # Get top proc codes for filter options
+        proc_codes = filtered_df[proc_col].dropna().unique()
+        top_proc_codes = filtered_df.groupby(proc_col)['payments'].sum().nlargest(50).index.tolist()
+        selected_proc_codes = st.sidebar.multiselect(
+            "Procedure Codes (Top 50 by Volume)",
+            options=top_proc_codes,
+            default=[]
+        )
+        if selected_proc_codes:
+            filtered_df = filtered_df[filtered_df[proc_col].isin(selected_proc_codes)]
+    
+    # Sales Order Search
+    st.sidebar.divider()
+    st.sidebar.subheader("Sales Order Search")
+    so_search = st.sidebar.text_input("Search Invoice/SO Number", placeholder="Enter number...")
+    
     # Calculate and display metrics
     metrics = calculate_metrics(filtered_df)
     display_metrics_panel(metrics, f"Key Metrics - {selected_period}")
     
     st.divider()
     
-    # Main charts
+    # Sales Order Search Results (if search is active)
+    if so_search and len(so_search) >= 2:
+        st.subheader("Sales Order Search Results")
+        search_results = search_sales_orders(df, so_search)
+        if len(search_results) > 0:
+            st.markdown(f"**Found {len(search_results)} matching records**")
+            st.dataframe(search_results, use_container_width=True, hide_index=True)
+        else:
+            st.info("No matching records found. Try a different search term.")
+        st.divider()
+    
+    # Main charts - Row 1
     col1, col2 = st.columns(2)
     
     with col1:
@@ -503,6 +780,7 @@ def main():
     with col2:
         st.plotly_chart(create_retail_insurance_chart(filtered_df), use_container_width=True)
     
+    # Main charts - Row 2
     col3, col4 = st.columns(2)
     
     with col3:
@@ -511,45 +789,47 @@ def main():
     with col4:
         st.plotly_chart(create_collection_rate_by_branch(filtered_df), use_container_width=True)
     
+    # Peer Group Percentile Analysis (full width)
+    st.divider()
+    st.subheader("Branch Performance Benchmarking")
+    st.plotly_chart(create_branch_percentile_chart(filtered_df), use_container_width=True)
+    
+    # Procedure Code Analysis by Branch
+    st.divider()
+    st.subheader("Procedure Code Analysis by Branch")
+    proc_top_n = st.slider("Number of top procedure codes to display", min_value=5, max_value=20, value=10)
+    st.plotly_chart(create_proc_code_by_branch_chart(filtered_df, top_n=proc_top_n), use_container_width=True)
+    
     # Yearly trend (full width)
     st.plotly_chart(create_yearly_trend(df), use_container_width=True)
     
-    # Branch breakdown table
-    st.subheader("Branch Performance Summary")
+    # Branch Performance Summary with Percentiles
+    st.subheader("Branch Performance Summary with Peer Percentiles")
     
-    branch_summary = filtered_df.groupby('branch').agg({
-        'payments': 'sum',
-        'balance': 'sum',
-        'is_retail': 'sum',
-        'is_insurance': 'sum',
-        'is_recurring': 'sum',
-        INVOICE_COLUMNS['number']: 'nunique',
-        'billing_period': 'mean'
-    }).reset_index()
-    
-    branch_summary.columns = ['Branch', 'Payments', 'Balance', 'Retail Items', 
-                               'Insurance Items', 'Recurring Items', 'Invoices', 'Avg Period']
-    branch_summary['Retail %'] = (branch_summary['Retail Items'] / 
-                                   (branch_summary['Retail Items'] + branch_summary['Insurance Items']) * 100).round(1)
-    branch_summary['Total Billed'] = branch_summary['Payments'] + branch_summary['Balance'].abs()
-    branch_summary['Collection %'] = np.where(
-        branch_summary['Total Billed'] > 0,
-        (branch_summary['Payments'] / branch_summary['Total Billed'] * 100).round(1),
-        100.0
-    )
-    
-    branch_summary = branch_summary.sort_values('Payments', ascending=False)
+    branch_perf = calculate_branch_percentiles(filtered_df)
+    branch_perf = branch_perf.sort_values('Performance_Score', ascending=False)
     
     # Format for display
-    display_df = branch_summary[['Branch', 'Invoices', 'Payments', 'Balance', 
-                                  'Retail %', 'Collection %', 'Avg Period']].copy()
-    display_df['Payments'] = display_df['Payments'].apply(lambda x: f"${x:,.0f}")
-    display_df['Balance'] = display_df['Balance'].apply(lambda x: f"${x:,.0f}")
-    display_df['Retail %'] = display_df['Retail %'].apply(lambda x: f"{x:.1f}%")
-    display_df['Collection %'] = display_df['Collection %'].apply(lambda x: f"{x:.1f}%")
-    display_df['Avg Period'] = display_df['Avg Period'].apply(lambda x: f"{x:.1f}")
+    display_perf = branch_perf[[
+        'Branch', 'Payments', 'Collection_Rate', 'Retail_Mix', 'Invoices',
+        'Payments_Pctl', 'Collection_Pctl', 'Retail_Mix_Pctl', 'Volume_Pctl', 'Performance_Score'
+    ]].copy()
     
-    st.dataframe(display_df, use_container_width=True, hide_index=True)
+    display_perf['Payments'] = display_perf['Payments'].apply(lambda x: f"${x:,.0f}")
+    display_perf['Collection_Rate'] = display_perf['Collection_Rate'].apply(lambda x: f"{x:.1f}%")
+    display_perf['Retail_Mix'] = display_perf['Retail_Mix'].apply(lambda x: f"{x:.1f}%")
+    display_perf['Payments_Pctl'] = display_perf['Payments_Pctl'].apply(lambda x: f"{x:.0f}")
+    display_perf['Collection_Pctl'] = display_perf['Collection_Pctl'].apply(lambda x: f"{x:.0f}")
+    display_perf['Retail_Mix_Pctl'] = display_perf['Retail_Mix_Pctl'].apply(lambda x: f"{x:.0f}")
+    display_perf['Volume_Pctl'] = display_perf['Volume_Pctl'].apply(lambda x: f"{x:.0f}")
+    display_perf['Performance_Score'] = display_perf['Performance_Score'].apply(lambda x: f"{x:.1f}")
+    
+    display_perf.columns = [
+        'Branch', 'Payments', 'Collection %', 'Retail Mix %', 'Invoices',
+        'Pay Pctl', 'Coll Pctl', 'Retail Pctl', 'Vol Pctl', 'Perf Score'
+    ]
+    
+    st.dataframe(display_perf, use_container_width=True, hide_index=True)
     
     # Data explorer
     with st.expander("Data Explorer"):
@@ -557,6 +837,7 @@ def main():
         
         sample_cols = [
             INVOICE_COLUMNS['number'],
+            INVOICE_COLUMNS['so_number'],
             INVOICE_COLUMNS['date_of_service'],
             'branch',
             INVOICE_COLUMNS['so_classification'],
