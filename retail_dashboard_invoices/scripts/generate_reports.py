@@ -207,6 +207,78 @@ def create_marketing_workbook(summary_df, branch_summary, billing_summary, outpu
     logger.info(f"Saved: {output_path.name}")
 
 
+def create_proc_code_analysis(retail_items_file, output_dir):
+    """Create proc code analysis charts using cleaned proc codes."""
+    if not retail_items_file.exists():
+        logger.warning("retail_invoice_items.csv not found - skipping proc code analysis")
+        return
+    
+    logger.info("Loading retail items for proc code analysis...")
+    df = pd.read_csv(retail_items_file, low_memory=False)
+    
+    if '_proc_code_clean' not in df.columns:
+        logger.warning("_proc_code_clean column not found - skipping proc code analysis")
+        return
+    
+    # Top 20 proc codes by count
+    proc_counts = df.groupby('_proc_code_clean').agg({
+        '_payments': 'sum',
+        'Invoice Number': 'count'
+    }).reset_index()
+    proc_counts.columns = ['Proc Code', 'Total Payments', 'Item Count']
+    proc_counts = proc_counts.sort_values('Item Count', ascending=False).head(20)
+    
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=proc_counts['Proc Code'],
+        y=proc_counts['Item Count'],
+        marker_color='#1E88E5',
+        text=proc_counts['Item Count'].apply(lambda x: f'{x:,}'),
+        textposition='outside',
+        name='Item Count'
+    ))
+    
+    fig.update_layout(
+        title='Top 20 Procedure Codes by Item Count (Retail)',
+        xaxis_title='HCPCS Procedure Code',
+        yaxis_title='Item Count',
+        height=500,
+        template='plotly_white'
+    )
+    
+    fig.write_html(output_dir / "top_proc_codes_by_count.html")
+    logger.info("Saved: top_proc_codes_by_count.html")
+    
+    # Top 20 proc codes by payments
+    proc_payments = df.groupby('_proc_code_clean').agg({
+        '_payments': 'sum',
+        'Invoice Number': 'count'
+    }).reset_index()
+    proc_payments.columns = ['Proc Code', 'Total Payments', 'Item Count']
+    proc_payments = proc_payments.sort_values('Total Payments', ascending=False).head(20)
+    
+    fig2 = go.Figure()
+    fig2.add_trace(go.Bar(
+        x=proc_payments['Proc Code'],
+        y=proc_payments['Total Payments'],
+        marker_color='#43A047',
+        text=proc_payments['Total Payments'].apply(lambda x: f'${x/1000:,.0f}K'),
+        textposition='outside',
+        name='Payments'
+    ))
+    
+    fig2.update_layout(
+        title='Top 20 Procedure Codes by Retail Payments',
+        xaxis_title='HCPCS Procedure Code',
+        yaxis_title='Total Payments ($)',
+        height=500,
+        template='plotly_white'
+    )
+    
+    fig2.write_html(output_dir / "top_proc_codes_by_payments.html")
+    logger.info("Saved: top_proc_codes_by_payments.html")
+
+
 def create_plotly_charts(summary_df, branch_summary, billing_summary, output_dir):
     """Create interactive Plotly charts."""
     
@@ -507,6 +579,13 @@ def main(input_dir: Path, output_dir: Path):
     logger.info("GENERATING PLOTLY CHARTS")
     logger.info("-" * 40)
     create_plotly_charts(summary_df, branch_summary, billing_summary, charts_dir)
+    
+    # Generate Proc Code Analysis Charts
+    logger.info("-" * 40)
+    logger.info("GENERATING PROC CODE ANALYSIS")
+    logger.info("-" * 40)
+    retail_items_file = input_dir / "retail_invoice_items.csv"
+    create_proc_code_analysis(retail_items_file, charts_dir)
     
     logger.info("=" * 60)
     logger.info("REPORTING COMPLETE")

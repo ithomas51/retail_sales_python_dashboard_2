@@ -27,8 +27,8 @@ from datetime import datetime, timedelta
 
 # Page configuration
 st.set_page_config(
-    page_title="Invoice Dashboard",
-    page_icon="📊",
+    page_title="Invoice Analytics Dashboard",
+    page_icon=None,
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -227,23 +227,23 @@ def display_metrics_panel(metrics: dict, title: str = "Key Metrics"):
     col1, col2, col3, col4, col5, col6 = st.columns(6)
     
     with col1:
-        st.metric("💰 Total Collected", f"${metrics['total_payments']:,.0f}")
+        st.metric("Total Collected", f"${metrics['total_payments']:,.0f}")
     
     with col2:
-        st.metric("⏳ Outstanding", f"${metrics['total_balance']:,.0f}")
+        st.metric("Outstanding Balance", f"${metrics['total_balance']:,.0f}")
     
     with col3:
-        st.metric("📊 Collection Rate", f"{metrics['collection_rate']:.1f}%")
+        st.metric("Collection Rate", f"{metrics['collection_rate']:.1f}%")
     
     with col4:
-        st.metric("📋 Invoices", f"{metrics['unique_invoices']:,}")
+        st.metric("Invoice Count", f"{metrics['unique_invoices']:,}")
     
     with col5:
         retail_pct = (metrics['retail_items'] / metrics['total_items'] * 100) if metrics['total_items'] > 0 else 0
-        st.metric("🛒 Retail %", f"{retail_pct:.1f}%")
+        st.metric("Retail Mix", f"{retail_pct:.1f}%")
     
     with col6:
-        st.metric("🔄 Recurring %", f"{metrics['recurring_pct']:.1f}%")
+        st.metric("Recurring Items", f"{metrics['recurring_pct']:.1f}%")
 
 
 def create_branch_comparison(df: pd.DataFrame) -> go.Figure:
@@ -453,8 +453,8 @@ def main():
         args = argparse.Namespace(input='data/brightree/invoices')
     
     # Title
-    st.title("📊 Invoice Dashboard")
-    st.markdown("**5-Year Analysis (FY2021 - FY2025) | Ending Period: December 31, 2025**")
+    st.title("Invoice Analytics Dashboard")
+    st.markdown("**5-Year Analysis (FY2021 - FY2025) | Reporting Period: January 1, 2021 - December 31, 2025**")
     
     # Sidebar filters
     st.sidebar.header("Filters")
@@ -515,7 +515,7 @@ def main():
     st.plotly_chart(create_yearly_trend(df), use_container_width=True)
     
     # Branch breakdown table
-    st.subheader("📋 Branch Summary")
+    st.subheader("Branch Performance Summary")
     
     branch_summary = filtered_df.groupby('branch').agg({
         'payments': 'sum',
@@ -552,7 +552,7 @@ def main():
     st.dataframe(display_df, use_container_width=True, hide_index=True)
     
     # Data explorer
-    with st.expander("🔍 Data Explorer"):
+    with st.expander("Data Explorer"):
         st.markdown(f"**Total Records:** {len(filtered_df):,}")
         
         sample_cols = [
@@ -562,6 +562,8 @@ def main():
             INVOICE_COLUMNS['so_classification'],
             'payor_level_clean',
             INVOICE_COLUMNS['item_name'],
+            INVOICE_COLUMNS['proc_code'],
+            '_proc_code_clean',
             'billing_period',
             'payments',
             'balance'
@@ -573,7 +575,7 @@ def main():
         # Download button
         csv = filtered_df[available_cols].to_csv(index=False)
         st.download_button(
-            label="📥 Download Filtered Data (CSV)",
+            label="Export to CSV",
             data=csv,
             file_name=f"invoice_data_{selected_period.replace(' ', '_').lower()}.csv",
             mime="text/csv"

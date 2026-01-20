@@ -332,6 +332,76 @@ df['is_new'] = df['billing_period'] == 1
 
 ---
 
+## 9. Procedure Code Standardization
+
+### Overview
+
+Raw procedure codes in invoice data contain variations (case differences, typos, prefixes). The pipeline standardizes these using a mapping file to enable consistent analysis.
+
+### Mapping File
+
+- **File:** `data/mapping_suggestions_DW_fixed.csv`
+- **Columns:**
+  - `final5`: Standardized HCPCS code (uppercase)
+  - `originals_pipe`: Pipe-separated original code variants
+  - `total_count`: Usage count across all years
+  - `files`: Source files containing the codes
+- **Total Mappings:** 1,277+ unique mappings
+
+### Standardization Logic
+
+```python
+def clean_proc_code(value) -> str:
+    """
+    Clean and standardize procedure code using mapping file.
+    Returns standardized HCPCS code (final5) or original uppercase if not mapped.
+    """
+    if pd.isna(value):
+        return 'UNKNOWN'
+    
+    orig = str(value).strip()
+    mapping = load_proc_code_mapping()
+    
+    # Try exact match, then uppercase match
+    if orig in mapping:
+        return mapping[orig]
+    if orig.upper() in mapping:
+        return mapping[orig.upper()]
+    
+    # No mapping found - return uppercase original
+    return orig.upper()
+```
+
+### Example Mappings
+
+| Original Variants | Standardized (final5) |
+|-------------------|----------------------|
+| `'E0184`, `E0184`, `e0184` | `E0184` |
+| `K0001`, `k0001`, `K001` | `K0001` |
+| `XZERO`, `xero`, `X9999`, `ZERO` | `XZERO` |
+| `E1399`, `e1399`, `E1399NU`, `E1399RR` | `E1399` |
+
+### Output Column
+
+The processed data includes:
+- `Invoice Detail Proc Code`: Original raw code
+- `_proc_code_clean`: Standardized HCPCS code
+
+### High-Volume Procedure Codes (Retail)
+
+| Proc Code | Description | Typical Count |
+|-----------|-------------|---------------|
+| `E1399` | Misc DME | 500K+ |
+| `E1390` | Oxygen Equipment | 290K+ |
+| `E0274` | Over-Bed Table | 250K+ |
+| `E0265` | Hospital Bed | 270K+ |
+| `E0305` | Bed Side Rails | 210K+ |
+| `E0181` | Pressure Pad | 160K+ |
+| `K0001` | Standard Wheelchair | 165K+ |
+| `E0143` | Walker | 125K+ |
+
+---
+
 ## Appendix B: Output Files
 
 ### From analyze_invoices.py
@@ -354,6 +424,8 @@ df['is_new'] = df['billing_period'] == 1
 | `charts/collection_rate_by_branch.html` | Collection metrics |
 | `charts/yearly_trends.html` | Year-over-year analysis |
 | `charts/top_branches.html` | Top 10 branches |
+| `charts/top_proc_codes_by_count.html` | Top 20 proc codes by item count |
+| `charts/top_proc_codes_by_payments.html` | Top 20 proc codes by revenue |
 
 ---
 

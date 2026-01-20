@@ -198,7 +198,7 @@ is_insurance = df['Policy Payor Level'].isin(['Primary', 'Secondary', 'Tertiary'
 |--------|-------------|------|
 | **Total Collected** | Sum of all payments | 💰 |
 | **Outstanding Balance** | Unpaid amounts | ⏳ |
-| **Collection Rate** | Payments / Total billed | 📊 |
+| **Collection Rate** | Payments / Total billed |  |
 | **Total Invoices** | Unique invoice count | 📋 |
 | **Avg Payment** | Mean payment per item | 💵 |
 | **Recurring %** | Billing period > 1 | 🔄 |
