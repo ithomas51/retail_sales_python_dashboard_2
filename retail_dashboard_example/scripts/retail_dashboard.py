@@ -437,6 +437,82 @@ def main():
     
     st.markdown("---")
     
+    # Order Status Breakdown by Time Period
+    st.subheader("Order Status Breakdown by Time Period")
+    
+    # Add order_status column to retail_df for this analysis
+    retail_df['order_status'] = retail_df['Sales Order Status'].fillna('Unknown').str.strip()
+    
+    # Calculate status percentages for each time period
+    time_periods = ["YTD", "QTD", "90 Days", "FY 2025", "3 Year", "5 Year", "All Time"]
+    period_map = {"FY 2025": "1 Year", "3 Year": "3 Years", "5 Year": "5 Years"}
+    
+    status_data = []
+    for period in time_periods:
+        period_key = period_map.get(period, period)
+        period_df = get_time_filtered_data(retail_df, period_key)
+        if len(period_df) > 0:
+            total_orders = period_df['Sales Order Number'].nunique()
+            for status in ['Closed', 'Active']:
+                status_orders = period_df[period_df['order_status'] == status]['Sales Order Number'].nunique()
+                pct = (status_orders / total_orders * 100) if total_orders > 0 else 0
+                status_data.append({
+                    'Time Period': period,
+                    'Status': status,
+                    'Orders': status_orders,
+                    'Percentage': round(pct, 1)
+                })
+    
+    status_df = pd.DataFrame(status_data)
+    
+    if len(status_df) > 0:
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # Grouped bar chart
+            fig = px.bar(
+                status_df,
+                x='Time Period',
+                y='Percentage',
+                color='Status',
+                barmode='group',
+                title="Closed vs Active Orders by Time Period (%)",
+                color_discrete_map={'Closed': '#2ecc71', 'Active': '#3498db'},
+                text='Percentage'
+            )
+            fig.update_traces(texttemplate='%{text:.1f}%', textposition='outside')
+            fig.update_layout(height=400, yaxis_title="Percentage (%)")
+            st.plotly_chart(fig, use_container_width=True)
+        
+        with col2:
+            # Stacked bar showing composition
+            fig = px.bar(
+                status_df,
+                x='Time Period',
+                y='Percentage',
+                color='Status',
+                barmode='stack',
+                title="Order Status Composition by Time Period",
+                color_discrete_map={'Closed': '#2ecc71', 'Active': '#3498db'}
+            )
+            fig.update_layout(height=400, yaxis_title="Percentage (%)")
+            st.plotly_chart(fig, use_container_width=True)
+        
+        # Summary table
+        pivot_df = status_df.pivot(index='Time Period', columns='Status', values='Percentage').reset_index()
+        pivot_df = pivot_df.reindex(columns=['Time Period', 'Closed', 'Active'])
+        pivot_df['Closed'] = pivot_df['Closed'].apply(lambda x: f"{x:.1f}%" if pd.notna(x) else "0%")
+        pivot_df['Active'] = pivot_df['Active'].apply(lambda x: f"{x:.1f}%" if pd.notna(x) else "0%")
+        
+        # Reorder to match time periods order
+        pivot_df['sort_order'] = pivot_df['Time Period'].map({p: i for i, p in enumerate(time_periods)})
+        pivot_df = pivot_df.sort_values('sort_order').drop('sort_order', axis=1)
+        
+        st.markdown("**Status Percentage Summary**")
+        st.dataframe(pivot_df, use_container_width=True, hide_index=True)
+    
+    st.markdown("---")
+    
     # Branch Analysis Section
     st.subheader("Branch Contribution Analysis")
     
