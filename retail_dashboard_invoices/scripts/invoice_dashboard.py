@@ -823,33 +823,51 @@ def main():
     if selected_branches:
         filtered_df = filtered_df[filtered_df['branch'].isin(selected_branches)]
     
-    # Payor type filter
+    # Payor type filter - apply BEFORE proc code filter so proc codes are contextual
     payor_filter = st.sidebar.radio("Payor Type", ["All", "Retail Only", "Insurance Only"])
-    if payor_filter == "Retail Only":
-        filtered_df = filtered_df[filtered_df['is_retail']]
-    elif payor_filter == "Insurance Only":
-        filtered_df = filtered_df[filtered_df['is_insurance']]
     
-    # Procedure Code filter
+    # Create payor-filtered dataset for proc code options
+    payor_filtered_df = filtered_df.copy()
+    if payor_filter == "Retail Only":
+        payor_filtered_df = payor_filtered_df[payor_filtered_df['is_retail']]
+    elif payor_filter == "Insurance Only":
+        payor_filtered_df = payor_filtered_df[payor_filtered_df['is_insurance']]
+    
+    # Procedure Code filter - shows only proc codes available for selected payor type
     st.sidebar.divider()
     st.sidebar.subheader("Procedure Code Filter")
-    proc_col = '_proc_code_clean' if '_proc_code_clean' in filtered_df.columns else INVOICE_COLUMNS['proc_code']
-    if proc_col in filtered_df.columns:
-        # Get top proc codes for filter options, including Unspecified
-        top_proc_codes = filtered_df.groupby(proc_col)['payments'].sum().nlargest(49).index.tolist()
+    proc_col = '_proc_code_clean' if '_proc_code_clean' in payor_filtered_df.columns else INVOICE_COLUMNS['proc_code']
+    if proc_col in payor_filtered_df.columns:
+        # Get ALL proc codes sorted by payment volume (not limited to top 50)
+        proc_code_totals = payor_filtered_df.groupby(proc_col)['payments'].sum().sort_values(ascending=False)
+        all_proc_codes = proc_code_totals.index.tolist()
         
         # Add Unspecified option if there are missing proc codes
-        has_missing = filtered_df[proc_col].isna().any() or (filtered_df[proc_col].str.strip() == '').any()
+        has_missing = payor_filtered_df[proc_col].isna().any() or (payor_filtered_df[proc_col].str.strip() == '').any()
         if has_missing:
-            filter_options = ['[Unspecified]'] + top_proc_codes
+            filter_options = ['[Unspecified]'] + all_proc_codes
         else:
-            filter_options = top_proc_codes
+            filter_options = all_proc_codes
+        
+        # Dynamic label based on payor selection
+        if payor_filter == "All":
+            filter_label = f"Procedure Codes ({len(all_proc_codes)} available)"
+        else:
+            filter_label = f"Procedure Codes ({len(all_proc_codes)} in {payor_filter.replace(' Only', '')})"
         
         selected_proc_codes = st.sidebar.multiselect(
-            "Procedure Codes (Top 50 by Volume)",
+            filter_label,
             options=filter_options,
             default=[]
         )
+        
+        # Apply payor filter to main dataframe
+        if payor_filter == "Retail Only":
+            filtered_df = filtered_df[filtered_df['is_retail']]
+        elif payor_filter == "Insurance Only":
+            filtered_df = filtered_df[filtered_df['is_insurance']]
+        
+        # Apply proc code filter
         if selected_proc_codes:
             if '[Unspecified]' in selected_proc_codes:
                 # Include both null and empty string proc codes
@@ -861,6 +879,12 @@ def main():
                     filtered_df = filtered_df[unspec_mask]
             else:
                 filtered_df = filtered_df[filtered_df[proc_col].isin(selected_proc_codes)]
+    else:
+        # Apply payor filter if proc_col not available
+        if payor_filter == "Retail Only":
+            filtered_df = filtered_df[filtered_df['is_retail']]
+        elif payor_filter == "Insurance Only":
+            filtered_df = filtered_df[filtered_df['is_insurance']]
     
     # Sales Order Search
     st.sidebar.divider()
