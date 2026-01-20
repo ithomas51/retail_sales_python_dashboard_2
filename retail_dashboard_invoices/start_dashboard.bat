@@ -13,6 +13,7 @@ echo Launching dashboard at http://localhost:8501
 echo Press Ctrl+C to stop the dashboard
 echo.
 
-streamlit run scripts/invoice_dashboard.py -- -i data/brightree/invoices
+REM Use parent directory .venv (located in sales_2020)
+"%~dp0..\.venv\Scripts\python.exe" -m streamlit run scripts/invoice_dashboard.py -- -i data/brightree/invoices
 
 pause
